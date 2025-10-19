@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>EPOSI • Doctor Portal</title>
+<style>
+/* ===== Brand ===== */
+:root{
+  --primary:#0C263A; --accent:#548DE9; --light:#DCE1E1;
+  --slate:#3D576F; --muted:#919EA5; --bubble-left: rgba(61,87,111,.35);
+}
+*{box-sizing:border-box} html,body{height:100%}
+body{margin:0;background:var(--primary);color:#fff;font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+
+/* ===== Header ===== */
+.header{display:flex;align-items:center;gap:16px;padding:16px 20px;border-bottom:1px solid rgba(220,225,225,.35)}
+.logo{height:48px}
+.controls{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--light);font-size:14px}
+.toggle-label{margin-right:12px}
+
+/* iOS-style switch */
+.switch{position:relative;display:inline-block;width:44px;height:24px}
+.switch input{display:none}
+.slider{position:absolute;inset:0;border-radius:999px;background:#44596e;cursor:pointer;transition:.2s}
+.slider::before{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:.2s}
+.switch input:checked + .slider{background:var(--accent)}
+.switch input:checked + .slider::before{transform:translateX(20px)}
+
+/* ===== Layout ===== */
+.main{height:calc(100% - 82px);display:flex;flex-direction:column}
+.thread{flex:1;overflow:auto;padding:20px;display:flex;flex-direction:column;gap:8px}
+.row{display:flex;gap:8px;align-items:flex-end}
+.row.right{justify-content:flex-end}
+.avatar{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--slate);color:#fff;font-weight:700;font-size:12px}
+.bubble{max-width:min(66vw,680px);padding:10px 12px;border-radius:16px;position:relative;white-space:pre-wrap;word-wrap:break-word}
+.left .bubble{background:var(--bubble-left)}
+.right .bubble{background:var(--accent)}
+.time,.receipt{font-size:12px;color:var(--muted);margin-top:2px}
+.typing{background:var(--bubble-left);display:flex;gap:5px;padding:8px 10px;border-radius:16px}
+.dot{width:6px;height:6px;border-radius:50%;background:#fff;opacity:.7;animation:bump 1s infinite}
+.dot:nth-child(2){animation-delay:.15s}.dot:nth-child(3){animation-delay:.3s}
+@keyframes bump{0%,80%,100%{transform:translateY(0)}40%{transform:translateY(-3px)}}
+
+/* ===== Composer ===== */
+.composer{display:flex;gap:10px;border-top:1px solid rgba(220,225,225,.2);padding:12px 16px;background:rgba(0,0,0,.15)}
+.composer textarea{flex:1;resize:none;color:#fff;background:rgba(255,255,255,.08);border:1px solid var(--slate);border-radius:8px;padding:10px}
+.btn{background:var(--accent);color:#fff;border:0;padding:10px 14px;border-radius:8px;font-weight:600;cursor:pointer}
+.btn:disabled{opacity:.6;cursor:not-allowed}
+
+/* ===== Banner ===== */
+.banner{position:fixed;left:20px;right:20px;bottom:16px;padding:10px 14px;border-radius:8px;background:#263b50;color:#fff;border:1px solid var(--slate)}
+.hidden{display:none}
+
+/* a11y */
+.sr-only{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
+</style>
+</head>
+<body>
+  <header class="header">
+    <img src="logo.png" alt="EPOSI" class="logo" />
+    <h1 class="sr-only">El Paso Orthopedic and Spine Institute • Doctor Portal</h1>
+
+    <div class="controls">
+      <label class="switch">
+        <input id="readToggle" type="checkbox" />
+        <span class="slider"></span>
+      </label>
+      <span class="toggle-label">Read receipts</span>
+
+      <label class="switch">
+        <input id="typingToggle" type="checkbox" />
+        <span class="slider"></span>
+      </label>
+      <span class="toggle-label">Show “typing…”</span>
+    </div>
+  </header>
+
+  <main class="main">
+    <section class="thread" id="thread" aria-live="polite"></section>
+
+    <form id="composer" class="composer">
+      <textarea id="messageInput" rows="2" placeholder="Type a message to patient…"></textarea>
+      <button id="sendBtn" type="submit" class="btn">Send</button>
+    </form>
+  </main>
+
+  <div id="banner" class="banner hidden"></div>
+
+<script>
+/* ========= CONFIG ========= */
+const API_BASE = "https://eposiportalapikey.onrender.com"; // <-- your Render URL
+const ENDPOINTS = {
+  messages: `${API_BASE}/api/messages`,
+  settings: `${API_BASE}/api/settings`,
+  typing:   `${API_BASE}/api/typing`,
+};
+
+/* ========= STATE ========= */
+let state = { messages: [], doctorAllowsReadReceipts: true, doctorTyping: false };
+
+/* ========= DOM ========= */
+const threadEl = document.getElementById("thread");
+const readToggle = document.getElementById("readToggle");
+const typingToggle = document.getElementById("typingToggle");
+const form = document.getElementById("composer");
+const input = document.getElementById("messageInput");
+const banner = document.getElementById("banner");
+
+/* ========= UTIL ========= */
+const isoTime = d => new Date(d).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+const showBanner = (msg, ms=2500) => { banner.textContent=msg; banner.classList.remove("hidden"); setTimeout(()=>banner.classList.add("hidden"), ms); };
+const sameGroup = (a,b) => a && b && a.role===b.role && (new Date(b.time)-new Date(a.time) <= 5*60*1000);
+
+/* ========= RENDER ========= */
+function render(){
+  threadEl.innerHTML = "";
+
+  state.messages.forEach((m, i) => {
+    const right = (m.role === "patient"); // patient on right
+    const row = document.createElement("div");
+    row.className = `row ${right ? "right" : "left"}`;
+
+    // avatar for doctor at start of a group
+    if (!right){
+      const prev = state.messages[i-1];
+      const newGroup = !sameGroup(prev, m);
+      const av = document.createElement("div");
+      av.className = "avatar";
+      av.textContent = (m.senderName || "Dr").split(" ").map(s=>s[0]).slice(0,2).join("").toUpperCase();
+      row.appendChild(newGroup ? av : Object.assign(document.createElement("div"), {style:"width:32px;height:32px"}));
+    }
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = m.text;
+    row.appendChild(bubble);
+
+    const wrapper = document.createElement("div");
+    wrapper.appendChild(row);
+
+    // time
+    const time = document.createElement("div");
+    time.className = "time";
+    time.textContent = isoTime(m.time);
+    time.style.textAlign = right ? "right" : "left";
+    wrapper.appendChild(time);
+
+    // receipts (under patient's messages only)
+    if (right){
+      const r = document.createElement("div");
+      r.className = "receipt";
+      const showRead = (m.status === "read") && state.doctorAllowsReadReceipts;
+      if (showRead) r.textContent = `Read ${isoTime(m.time)}`;
+      else if (m.status === "delivered" || m.status === "read") r.textContent = "Delivered";
+      else if (m.status === "sent") r.textContent = "Sent";
+      else r.textContent = "Sending…";
+      r.style.textAlign = "right";
+      wrapper.appendChild(r);
+    }
+
+    threadEl.appendChild(wrapper);
+    row.classList.add(right ? "right" : "left");
+  });
+
+  // typing indicator
+  if (state.doctorTyping){
+    const row = document.createElement("div");
+    row.className = "row left";
+    const av = document.createElement("div");
+    av.className = "avatar"; av.textContent = "DD";
+    const typing = document.createElement("div");
+    typing.className = "typing";
+    typing.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
+    row.appendChild(av); row.appendChild(typing);
+    threadEl.appendChild(row);
+  }
+
+  // stick to bottom
+  threadEl.scrollTop = threadEl.scrollHeight;
+}
+
+/* ========= API ========= */
+async function getJSON(url, opts){
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function loadAll(){
+  try{
+    const settings = await getJSON(ENDPOINTS.settings);
+    state.doctorAllowsReadReceipts = !!settings.doctorAllowsReadReceipts;
+    readToggle.checked = state.doctorAllowsReadReceipts;
+  }catch(e){ showBanner("Settings load failed"); }
+
+  try{
+    const msgs = await getJSON(ENDPOINTS.messages);
+    state.messages = msgs;
+  }catch(e){ showBanner("Messages load failed"); }
+
+  try{
+    const t = await getJSON(ENDPOINTS.typing);
+    state.doctorTyping = !!t.doctorTyping;
+    typingToggle.checked = state.doctorTyping;
+  }catch(e){ /* optional */ }
+
+  render();
+}
+
+async function sendMessage(text){
+  const temp = {
+    id: crypto.randomUUID(),
+    role: "doctor",            // doctor sending from website
+    text, time: new Date().toISOString(),
+    status: "sent", senderName: "Dr. Dunn"
+  };
+  state.messages.push(temp); render();
+
+  try{
+    const res = await getJSON(ENDPOINTS.messages, {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify(temp)
+    });
+    // Replace temp with server copy (in case server sets different status/ids)
+    const idx = state.messages.findIndex(m => m.id === temp.id);
+    if (idx !== -1) state.messages[idx] = res;
+    render();
+  }catch(e){
+    showBanner("Send failed");
+  }
+}
+
+async function setReadToggle(val){
+  try{
+    const s = await getJSON(ENDPOINTS.settings, {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ doctorAllowsReadReceipts: !!val })
+    });
+    state.doctorAllowsReadReceipts = !!s.doctorAllowsReadReceipts;
+    readToggle.checked = state.doctorAllowsReadReceipts;
+    render();
+  }catch(e){ showBanner("Could not update read receipts"); }
+}
+
+async function setTyping(val){
+  try{
+    await getJSON(ENDPOINTS.typing, {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ doctorTyping: !!val })
+    });
+    state.doctorTyping = !!val; render();
+  }catch(e){ showBanner("Could not update typing"); }
+}
+
+/* ========= EVENTS ========= */
+form.addEventListener("submit", e=>{
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  sendMessage(text);
+  input.value = "";
+});
+
+readToggle.addEventListener("change", e=> setReadToggle(e.target.checked));
+typingToggle.addEventListener("change", e=> setTyping(e.target.checked));
+
+/* ========= INIT & POLL ========= */
+loadAll();
+setInterval(async ()=>{
+  try{
+    const msgs = await getJSON(ENDPOINTS.messages);
+    // Simple replace; in prod, diff/merge or use websockets
+    state.messages = msgs; render();
+  }catch(e){ /* ignore transient errors */ }
+}, 3000);
+</script>
+</body>
+</html>
